@@ -1,0 +1,16 @@
+@Leaderboard.Api_HostAddress = https://localhost:32777
+
+POST {{Leaderboard.Api_HostAddress}}/customer/4/score/50
+Accept: application/json
+###
+
+
+GET {{Leaderboard.Api_HostAddress}}/leaderboard?start=1&end=10
+Accept: application/json
+###
+
+
+GET {{Leaderboard.Api_HostAddress}}/leaderboard/1?high=1&low=1
+Accept: application/json
+
+###
