@@ -6,7 +6,7 @@ namespace Leaderboard.Api.Controllers.Leaderboard.Dtos
     public class GetCustomerRanksDto : IValidatableObject
     {
         /// <summary>
-        /// start rank, included in response if exists
+        /// Start rank, included in response if exists
         /// </summary>
         [FromQuery(Name = "start")]
         [Required]
@@ -14,7 +14,7 @@ namespace Leaderboard.Api.Controllers.Leaderboard.Dtos
         public int Start { get; set; }
 
         /// <summary>
-        /// end rank, included in response if exists
+        /// End rank, included in response if exists
         /// </summary>
         [FromQuery(Name = "end")]
         [Required]

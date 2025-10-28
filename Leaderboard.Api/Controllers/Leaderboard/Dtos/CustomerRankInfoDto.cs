@@ -3,17 +3,17 @@ namespace Leaderboard.Api.Controllers.Leaderboard.Dtos
     public class CustomerRankInfoDto
     {
         /// <summary>
-        /// Customer Unique Identifier
+        /// Customer unique Identifier
         /// </summary>
         public long CustomerId { get; set; }
 
         /// <summary>
-        /// Customer Score
+        /// Customer score
         /// </summary>
         public long Score { get; set; }
 
         /// <summary>
-        /// Customer Rank
+        /// Customer rank
         /// </summary>
         public int Rank { get; set; }
     }

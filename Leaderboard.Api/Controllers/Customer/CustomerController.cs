@@ -1,7 +1,6 @@
 using Leaderboard.Api.Controllers.Customer.Dtos;
 using Leaderboard.Api.Interfaces;
 using Microsoft.AspNetCore.Mvc;
-using System.Numerics;
 
 namespace Leaderboard.Api.Controllers.Customer
 {
@@ -17,7 +16,7 @@ namespace Leaderboard.Api.Controllers.Customer
         }
 
         /// <summary>
-        /// Update Score
+        /// Update score
         /// </summary>
         /// <param name="updateDto"></param>
         /// <returns>Current score after update</returns>

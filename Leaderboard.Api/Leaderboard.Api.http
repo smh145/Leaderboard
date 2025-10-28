@@ -1,6 +1,6 @@
-@Leaderboard.Api_HostAddress = https://localhost:32777
+@Leaderboard.Api_HostAddress = https://localhost:32773
 
-POST {{Leaderboard.Api_HostAddress}}/customer/4/score/50
+POST {{Leaderboard.Api_HostAddress}}/customer/3/score/50
 Accept: application/json
 ###
 
@@ -10,7 +10,7 @@ Accept: application/json
 ###
 
 
-GET {{Leaderboard.Api_HostAddress}}/leaderboard/1?high=1&low=1
+GET {{Leaderboard.Api_HostAddress}}/leaderboard/2?high=1&low=1
 Accept: application/json
 
 ###

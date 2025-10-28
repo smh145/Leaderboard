@@ -1,33 +1,20 @@
 namespace Leaderboard.Api.Controllers.Leaderboard.Dtos
 {
-    public class CustomerRankInfo : IComparable<CustomerRankInfo>
+    public class CustomerRankInfo
     {
         /// <summary>
-        /// Customer Unique Identifier
+        /// Customer unique identifier
         /// </summary>
         public long CustomerId { get; set; }
 
         /// <summary>
-        /// Customer Score
+        /// Customer score
         /// </summary>
         public long Score { get; set; }
 
         /// <summary>
-        /// Customer Rank
+        /// Customer rank
         /// </summary>
         public int Rank { get; set; }
-
-        public int CompareTo(CustomerRankInfo? other)
-        {
-            if (other == null) return 1;
-
-            int scoreComp = other.Score.CompareTo(this.Score);
-            if (scoreComp != 0)
-            {
-                return scoreComp;
-            }
-
-            return this.CustomerId.CompareTo(other.CustomerId);
-        }
     }
 }
