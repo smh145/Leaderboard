@@ -3,6 +3,7 @@ using Leaderboard.Api.Interfaces;
 
 namespace Leaderboard.Api.Services
 {
+    // Realtime leaderboard
     public class LeaderboardService : ILeaderboardService
     {
         /// <summary>
@@ -42,10 +43,6 @@ namespace Leaderboard.Api.Services
         /// Cache customerId => rank
         /// </summary>
         private Dictionary<long, int> _rankByCustomerId;
-        /// <summary>
-        /// A flag whether caches are dirty.
-        /// </summary>
-        private bool _isDirty;
 
         public LeaderboardService()
         {
@@ -55,7 +52,6 @@ namespace Leaderboard.Api.Services
             _prefixSums = new List<(int count, long score, SortedSet<long> bucket)>();
             _prefixSumsByScore = new Dictionary<long, int>();
             _rankByCustomerId = new Dictionary<long, int>();
-            _isDirty = true;
         }
 
         public Task<long> UpdateScoreAsync(long customerId, long score)
@@ -89,8 +85,7 @@ namespace Leaderboard.Api.Services
                 }
                 newBucket.Add(customerId);
 
-                // Mark cache dirty, rebuilt next read
-                _isDirty = true;
+                RebuildPrefixSums();
 
                 return Task.FromResult(newScore);
             }
@@ -141,49 +136,36 @@ namespace Leaderboard.Api.Services
         /// </summary>
         private void RebuildPrefixSums()
         {
-            if (_isDirty)
+            int count = 0;
+            _prefixSums.Clear();
+            _prefixSumsByScore.Clear();
+            _rankByCustomerId.Clear();
+
+            foreach (var bucket in _scoreBuckets)
             {
-                _lock.EnterWriteLock();
-                try
-                {
-                    // Double-check the _isDirty flag
-                    if (_isDirty)
-                    {
-                        int count = 0;
-                        _prefixSums.Clear();
-                        _prefixSumsByScore.Clear();
-                        _rankByCustomerId.Clear();
-
-                        foreach (var bucket in _scoreBuckets)
-                        {
-                            _prefixSums.Add((count, bucket.Key, bucket.Value));
-                            _prefixSumsByScore.Add(bucket.Key, count);
-                            count += bucket.Value.Count;
-                        }
-
-                        _isDirty = false;
-                    }
-                }
-                finally
-                {
-                    _lock.ExitWriteLock();
-                }
+                _prefixSums.Add((count, bucket.Key, bucket.Value));
+                _prefixSumsByScore.Add(bucket.Key, count);
+                count += bucket.Value.Count;
             }
         }
 
         public Task<List<CustomerRankInfo>> GetRanksAsync(int start, int end)
         {
-            _lock.EnterUpgradeableReadLock();
+            _lock.EnterReadLock();
 
             try
             {
-                RebuildPrefixSums();
+                if (end < start || _customerScores.Count < start )
+                {
+                    return Task.FromResult(new List<CustomerRankInfo>());
+
+                }
 
                 return GetRanksByRangeAsync(start, end);
             }
             finally
             {
-                _lock.ExitUpgradeableReadLock();
+                _lock.ExitReadLock();
             }
         }
 
@@ -241,12 +223,10 @@ namespace Leaderboard.Api.Services
 
         public Task<List<CustomerRankInfo>> GetRanksByIdAsync(long customerId, int high, int low)
         {
-            _lock.EnterUpgradeableReadLock();
+            _lock.EnterReadLock();
 
             try
             {
-                RebuildPrefixSums();
-
                 var result = new List<CustomerRankInfo>();
                 if (!_customerScores.TryGetValue(customerId, out var customerScore))
                 {
@@ -278,7 +258,7 @@ namespace Leaderboard.Api.Services
             }
             finally
             {
-                _lock.ExitUpgradeableReadLock();
+                _lock.ExitReadLock();
             }
         }
 
