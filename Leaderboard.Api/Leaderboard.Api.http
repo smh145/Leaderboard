@@ -1,4 +1,4 @@
-@Leaderboard.Api_HostAddress = https://localhost:32773
+@Leaderboard.Api_HostAddress = https://localhost:32769
 
 POST {{Leaderboard.Api_HostAddress}}/customer/3/score/50
 Accept: application/json

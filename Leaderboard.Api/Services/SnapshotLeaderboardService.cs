@@ -1,25 +1,34 @@
 using Leaderboard.Api.Controllers.Leaderboard.Dtos;
 using Leaderboard.Api.Interfaces;
+using System.Collections.Concurrent;
 
 namespace Leaderboard.Api.Services
 {
     /// <summary>
-    /// Leaderboard use ReaderWriterLockSlim
-    /// ReaderWriterLockSlim does not strictly guarantee FIFO on the server side
-    /// So the Leaderboard is not completely real-time
-    /// If a fair reader-writer lock could be implemented, further optimizations are possible (I failed):
-    /// 1. For an update request, the current score can be returned immediately, while the Leaderboard update operation waits for the lock.
-    /// 2. Consecutive write requests can be merged. Updates for the same customerId can be combined, reducing the number of write lock acquisitions.
-    /// 3. Rebuild the cache when switching between read and write locks.
+    /// Snapshot leaderboard implementation using background task and buffering.
+    /// This leaderboard service achieves more efficient score updates and rank queries by buffering score changes in a queue 
+    /// and periodically processing these updates via a background task to build leaderboard snapshots.
+    /// 1. When updating scores, the service adds update requests to the queue and immediately returns the latest score to the caller.
+    /// 2. Reduces write lock hold time, improving concurrent processing capability.
+    /// 3. During periodic leaderboard rebuilds, merges score change operations for the same user, reducing the number of sorts.
+    /// 4. Reduces the frequency of cache rebuilds.
+    /// However, this may result in situations where score updates succeed but rank queries do not yet reflect the latest scores.
     /// </summary>
-    public class LeaderboardService : ILeaderboardService
+    public class SnapshotLeaderboardService : ILeaderboardService
     {
         private readonly ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
 
         /// <summary>
-        /// Stores the score for each customer. customerId => score
+        /// Realtime Stores the score for each customer. customerId => score
+        /// Only used for score retrieval without waiting
         /// </summary>
-        private readonly Dictionary<long, long> _customerScores;
+        private readonly ConcurrentDictionary<long, long> _realtimeCustomerScores;
+
+        /// <summary>
+        /// Stores the score for each customer. customerId => score
+        /// Used for building immutable snapshots
+        /// </summary>
+        private readonly ConcurrentDictionary<long, long> _customerScores;
 
         /// <summary> 
         /// Dictionary is sorted by score bucket in descending order.   
@@ -45,65 +54,160 @@ namespace Leaderboard.Api.Services
         /// Cache customerId => rank
         /// </summary>
         private Dictionary<long, int> _rankByCustomerId;
-
         /// <summary>
         /// Bucket size for score ranges
         /// </summary>
         private const int BUCKET_SIZE = 100;
 
-        public LeaderboardService()
+        /// <summary>
+        /// Updates queue
+        /// </summary>
+        private readonly ConcurrentQueue<ScoreUpdate> _updateQueue;
+        /// <summary>
+        /// Updates queue Count
+        /// </summary>
+        private int _updateQueueCount;
+
+        /// <summary>
+        /// Rebuilds interval
+        /// </summary>
+        private const int TIME_SLICE_MS = 100;
+
+        /// <summary>
+        /// Background task for rebuilding
+        /// </summary>
+        private readonly Task _rebuildTask;
+        private readonly CancellationTokenSource _cancellationTokenSource;
+
+        public SnapshotLeaderboardService()
         {
-            _customerScores = new Dictionary<long, long>();
-            // Buckets sorted in descending order
+            _realtimeCustomerScores = new ConcurrentDictionary<long, long>();
+            _customerScores = new ConcurrentDictionary<long, long>();
             _scoreBuckets = new SortedDictionary<long, SortedSet<CustomerEntry>>(
                 Comparer<long>.Create((a, b) => b.CompareTo(a)));
 
             _prefixSums = new List<(int count, long bucketKey, SortedSet<CustomerEntry> bucket)>();
             _prefixSumsByScore = new Dictionary<long, int>();
             _rankByCustomerId = new Dictionary<long, int>();
+
+            _updateQueue = new ConcurrentQueue<ScoreUpdate>();
+            _updateQueueCount = 0;
+
+            _cancellationTokenSource = new CancellationTokenSource();
+            _rebuildTask = Task.Run(() => RebuildLoop(_cancellationTokenSource.Token));
         }
 
+        private int _isRebuilding;
 
-        public Task<long> UpdateScoreAsync(long customerId, long score)
+        /// <summary>
+        /// Periodically rebuilds
+        /// </summary>
+        private async Task RebuildLoop(CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(TIME_SLICE_MS, cancellationToken);
+
+                    int pendingCount = Interlocked.CompareExchange(ref _updateQueueCount, 0, 0);
+                    if (pendingCount > 0 && Interlocked.CompareExchange(ref _isRebuilding, 1, 0) == 0)
+                    {
+                        // Only start rebuild if not already rebuilding
+                        try
+                        {
+                            await ProcessRebuildAsync();
+                        }
+                        finally
+                        {
+                            Interlocked.Exchange(ref _isRebuilding, 0);
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+
+        /// <summary>
+        /// Process rebuild
+        /// </summary>
+        private Task ProcessRebuildAsync()
         {
             _lock.EnterWriteLock();
             try
             {
-                long newScore = score;
-                if (_customerScores.TryGetValue(customerId, out long curScore))
+                Dictionary<long, long> customerScoreDelta = new Dictionary<long, long>();
+                while (_updateQueue.TryDequeue(out var update))
                 {
-                    newScore = curScore + score;
-                    // Remove the customer from old bucket.
-                    long oldBucketKey = GetBucketKey(curScore);
-                    if (_scoreBuckets.TryGetValue(oldBucketKey, out var oldBucket))
+                    Interlocked.Decrement(ref _updateQueueCount);
+                    if (!customerScoreDelta.ContainsKey(update.CustomerId))
                     {
-                        oldBucket.Remove(new CustomerEntry(curScore, customerId));
-                        if (oldBucket.Count == 0)
+                        customerScoreDelta.Add(update.CustomerId, 0);
+                    }
+
+                    customerScoreDelta[update.CustomerId] += update.ScoreDelta;
+                }
+
+                foreach (var item in customerScoreDelta)
+                {
+                    long customerId = item.Key;
+                    long newScore = item.Value;
+                    if (_customerScores.TryGetValue(customerId, out long curScore))
+                    {
+                        newScore = curScore + item.Value;
+                        // Remove the customer from old bucket.
+                        long oldBucketKey = GetBucketKey(curScore);
+                        if (_scoreBuckets.TryGetValue(oldBucketKey, out var oldBucket))
                         {
-                            _scoreBuckets.Remove(oldBucketKey);
+                            oldBucket.Remove(new CustomerEntry(curScore, customerId));
+                            if (oldBucket.Count == 0)
+                            {
+                                _scoreBuckets.Remove(oldBucketKey);
+                            }
                         }
                     }
-                }
 
-                _customerScores[customerId] = newScore;
+                    _customerScores[customerId] = newScore;
 
-                // Add the customer to new bucket.
-                long newBucketKey = GetBucketKey(newScore);
-                if (!_scoreBuckets.TryGetValue(newBucketKey, out var newBucket))
-                {
-                    newBucket = new SortedSet<CustomerEntry>();
-                    _scoreBuckets[newBucketKey] = newBucket;
+                    // Add the customer to new bucket.
+                    long newBucketKey = GetBucketKey(newScore);
+                    if (!_scoreBuckets.TryGetValue(newBucketKey, out var newBucket))
+                    {
+                        newBucket = new SortedSet<CustomerEntry>();
+                        _scoreBuckets[newBucketKey] = newBucket;
+                    }
+                    newBucket.Add(new CustomerEntry(newScore, customerId));
                 }
-                newBucket.Add(new CustomerEntry(newScore, customerId));
 
                 RebuildCache();
-
-                return Task.FromResult(newScore);
             }
             finally
             {
                 _lock.ExitWriteLock();
             }
+
+            return Task.CompletedTask;
+        }
+
+
+        public Task<long> UpdateScoreAsync(long customerId, long score)
+        {
+            long newScore = _realtimeCustomerScores.AddOrUpdate(
+                customerId,
+                score,
+                (key, existingScore) => existingScore + score);
+
+            var update = new ScoreUpdate(customerId, score);
+            _updateQueue.Enqueue(update);
+            Interlocked.Increment(ref _updateQueueCount);
+
+            return Task.FromResult(newScore);
         }
 
         public Task<List<CustomerRankInfo>> GetRanksAsync(int start, int end)
@@ -178,7 +282,6 @@ namespace Leaderboard.Api.Services
                 _lock.ExitReadLock();
             }
         }
-
         private Task<List<CustomerRankInfo>> GetRanksByRangeAsync(int start, int end)
         {
             var result = new List<CustomerRankInfo>();
@@ -297,6 +400,16 @@ namespace Leaderboard.Api.Services
 
         public void Dispose()
         {
+            _cancellationTokenSource?.Cancel();
+            _cancellationTokenSource?.Dispose();
+
+            try
+            {
+                _rebuildTask?.Wait(TimeSpan.FromSeconds(10));
+            }
+            catch (Exception)
+            {
+            }
             _lock?.Dispose();
         }
     }
