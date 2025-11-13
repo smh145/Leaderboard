@@ -16,7 +16,7 @@ namespace Leaderboard.Tests
         [Fact]
         public async Task ValidateLeaderboardCorrectness()
         {
-            ILeaderboardService service = new SnapshotLeaderboardService();
+            ILeaderboardService service = new LeaderboardService();
             _output.WriteLine("=== Leaderboard Correctness Validation Started ===\n");
 
             // Test 1: Validate score accumulation
@@ -33,14 +33,12 @@ namespace Leaderboard.Tests
             await service.UpdateScoreAsync(4, 100);
             await service.UpdateScoreAsync(5, 50);
 
-            await Task.Delay(200);
-
             var top5 = await service.GetRanksAsync(1, 5);
             Assert.Equal(5, top5.Count);
             Assert.Equal(2, top5[0].CustomerId);
             Assert.Equal(200, top5[0].Score);
             Assert.Equal(1, top5[0].Rank);
-            
+
             _output.WriteLine($"Y  Rank 1: Customer {top5[0].CustomerId}, Score {top5[0].Score}");
             _output.WriteLine($"Y  Rank 2: Customer {top5[1].CustomerId}, Score {top5[1].Score}");
             _output.WriteLine($"Y  Rank 3: Customer {top5[2].CustomerId}, Score {top5[2].Score}");
@@ -66,8 +64,6 @@ namespace Leaderboard.Tests
             _output.WriteLine("\nTest 5: Validate Ranking Updates After Score Changes");
             await service.UpdateScoreAsync(5, 200);
 
-            await Task.Delay(200);
-
             var updatedTop3 = await service.GetRanksAsync(1, 3);
             Assert.Equal(5, updatedTop3[0].CustomerId);
             Assert.Equal(250, updatedTop3[0].Score);
@@ -76,7 +72,7 @@ namespace Leaderboard.Tests
 
             // Test 6: Validate boundary conditions
             _output.WriteLine("\nTest 6: Validate Boundary Conditions");
-            
+
             var emptyResult = await service.GetRanksAsync(100, 200);
             Assert.Empty(emptyResult);
             _output.WriteLine("Y  Empty result for out-of-range query");
@@ -91,7 +87,7 @@ namespace Leaderboard.Tests
 
             // Test 7: Validate large-scale consistency
             _output.WriteLine("\nTest 7: Validate Large-Scale Consistency");
-            ILeaderboardService service2 = new SnapshotLeaderboardService();
+            ILeaderboardService service2 = new LeaderboardService();
             var random = new Random(42);
             var expectedScores = new Dictionary<long, long>();
 
@@ -102,7 +98,6 @@ namespace Leaderboard.Tests
                 expectedScores[i] = finalScore;
             }
 
-            await Task.Delay(200);
 
             var allRanks = await service2.GetRanksAsync(1, 100);
             Assert.Equal(100, allRanks.Count);
@@ -112,11 +107,11 @@ namespace Leaderboard.Tests
             {
                 var current = allRanks[i];
                 var next = allRanks[i + 1];
-                
-                Assert.True(current.Score > next.Score || 
+
+                Assert.True(current.Score > next.Score ||
                            (current.Score == next.Score && current.CustomerId < next.CustomerId),
                            $"Ranking order violated at position {i}");
-                
+
                 Assert.Equal(expectedScores[current.CustomerId], current.Score);
             }
             _output.WriteLine($"Y  Ranking order is correct (descending by score, ascending by customer ID for ties)");
@@ -132,13 +127,12 @@ namespace Leaderboard.Tests
 
             // Test 9: Validate cross-bucket ranking
             _output.WriteLine("\nTest 9: Validate Cross-Bucket Ranking");
-            ILeaderboardService service3 = new SnapshotLeaderboardService();
+            ILeaderboardService service3 = new LeaderboardService();
             await service3.UpdateScoreAsync(1, 50);
             await service3.UpdateScoreAsync(2, 150);
             await service3.UpdateScoreAsync(3, 250);
             await service3.UpdateScoreAsync(4, 350);
 
-            await Task.Delay(200);
 
             var crossBucket = await service3.GetRanksAsync(1, 4);
             Assert.Equal(4, crossBucket.Count);
@@ -154,7 +148,7 @@ namespace Leaderboard.Tests
         {
             _output.WriteLine("=== Concurrent Operations Validation Started ===\n");
 
-            ILeaderboardService service = new SnapshotLeaderboardService();
+            ILeaderboardService service = new LeaderboardService();
             var random = new Random();
 
             for (long i = 1; i <= 50; i++)
@@ -171,7 +165,6 @@ namespace Leaderboard.Tests
                 tasks.Add(Task.Run(async () => await service.UpdateScoreAsync(customerId, random.Next(1, 100))));
             }
 
-            await Task.Delay(200);
 
             for (int i = 0; i < 20; i++)
             {
@@ -189,12 +182,12 @@ namespace Leaderboard.Tests
 
             var finalRanks = await service.GetRanksAsync(1, 50);
             Assert.True(finalRanks.Count > 0, "Should have rankings after concurrent operations");
-            
+
             for (int i = 0; i < finalRanks.Count - 1; i++)
             {
                 var current = finalRanks[i];
                 var next = finalRanks[i + 1];
-                Assert.True(current.Score > next.Score || 
+                Assert.True(current.Score > next.Score ||
                            (current.Score == next.Score && current.CustomerId < next.CustomerId),
                            "Ranking order should be maintained after concurrent operations");
             }

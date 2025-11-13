@@ -1,303 +1,356 @@
-using Leaderboard.Api.Controllers.Leaderboard.Dtos;
+using Leaderboard.Api.Controllers.Models;
+using Leaderboard.Api.Extensions;
 using Leaderboard.Api.Interfaces;
+using System.Collections.Concurrent;
 
 namespace Leaderboard.Api.Services
 {
     /// <summary>
-    /// Leaderboard use ReaderWriterLockSlim
-    /// ReaderWriterLockSlim does not strictly guarantee FIFO on the server side
-    /// So the Leaderboard is not completely real-time
-    /// If a fair reader-writer lock could be implemented, further optimizations are possible (I failed):
-    /// 1. For an update request, the current score can be returned immediately, while the Leaderboard update operation waits for the lock.
-    /// 2. Consecutive write requests can be merged. Updates for the same customerId can be combined, reducing the number of write lock acquisitions.
-    /// 3. Rebuild the cache when switching between read and write locks.
+    /// Leaderboard
     /// </summary>
-    public class LeaderboardService : ILeaderboardService
+    public class LeaderboardService : ILeaderboardService, IDisposable
     {
-        private readonly ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
-
         /// <summary>
-        /// Stores the score for each customer. customerId => score
+        /// Stores the score for each customer.
+        /// CustomerId => score
         /// </summary>
-        private readonly Dictionary<long, long> _customerScores;
+        private readonly ConcurrentDictionary<long, long> _customerScores;
 
         /// <summary> 
-        /// Dictionary is sorted by score bucket in descending order.   
-        /// Whether to bucket by individual score or by score ranges (10,100,1000... ) 
-        /// should be determined by business requirements. For now, bucketing by 100.
-        /// Bucket key score / 100 => a sorted set of CustomerEntry.
-        /// Within each bucket, entries are sorted by score descending, then by customerId ascending.
+        /// Buckets are divided by score range, 
+        /// and the bucket size should be adjusted according to actual business scenarios.
+        /// Buckets for low score ranges should be smaller to distribute write operations, 
+        /// but it's better to keep them larger than 2000 to reduce cross-bucket operations.
+        /// Within each bucket, entries are sorted in descending order of score, then in ascending order of customerId.
         /// </summary>
-        private readonly SortedDictionary<long, SortedSet<CustomerEntry>> _scoreBuckets;
-
-        /// <summary>
-        /// Cache stores prefix sums for fast rank lookups.
-        /// - count: The number of customers with a higher rank (its starting rank)
-        /// - bucketKey: The bucket key for the range.
-        /// - bucket: The set of CustomerEntry in that bucket.
-        /// </summary>
-        private List<(int count, long bucketKey, SortedSet<CustomerEntry> bucket)> _prefixSums;
-        /// <summary>
-        /// Cache bucketKey => starting rank
-        /// </summary>
-        private Dictionary<long, int> _prefixSumsByScore;
-        /// <summary>
-        /// Cache customerId => rank
-        /// </summary>
-        private Dictionary<long, int> _rankByCustomerId;
-
-        /// <summary>
-        /// Bucket size for score ranges
-        /// </summary>
-        private const int BUCKET_SIZE = 100;
+        private readonly Dictionary<long, BucketNode> _scoreBuckets;
 
         public LeaderboardService()
         {
-            _customerScores = new Dictionary<long, long>();
-            // Buckets sorted in descending order
-            _scoreBuckets = new SortedDictionary<long, SortedSet<CustomerEntry>>(
-                Comparer<long>.Create((a, b) => b.CompareTo(a)));
+            _customerScores = new ConcurrentDictionary<long, long>();
+            _scoreBuckets = new Dictionary<long, BucketNode>();
 
-            _prefixSums = new List<(int count, long bucketKey, SortedSet<CustomerEntry> bucket)>();
-            _prefixSumsByScore = new Dictionary<long, int>();
-            _rankByCustomerId = new Dictionary<long, int>();
+            for (long i = 0; i <= BUCKET_MAX_SIZE; i++)
+            {
+                _scoreBuckets.Add(i, new BucketNode());
+            }
         }
 
+        private const int BUCKET_MAX_SIZE = 31;
+        private long GetBucketKey(long score)
+        {
+            if (score <= 0) return 0;
+
+            if (score <= 5000) return 1;
+            if (score <= 10000) return 2;
+            if (score <= 15000) return 3;
+            if (score <= 20000) return 4;
+            if (score <= 25000) return 5;
+            if (score <= 30000) return 6;
+            if (score <= 35000) return 7;
+            if (score <= 40000) return 8;
+            if (score <= 45000) return 9;
+
+            if (score <= 50000) return 10;
+            if (score <= 100000) return 11;
+            if (score <= 150000) return 12;
+            if (score <= 200000) return 13;
+            if (score <= 250000) return 14;
+            if (score <= 300000) return 15;
+            if (score <= 350000) return 16;
+            if (score <= 400000) return 17;
+            if (score <= 450000) return 18;
+
+            if (score <= 500000) return 19;
+            if (score <= 1000000) return 20;
+            if (score <= 1500000) return 21;
+            if (score <= 2000000) return 22;
+            if (score <= 2500000) return 23;
+            if (score <= 3000000) return 24;
+            if (score <= 3500000) return 25;
+            if (score <= 4000000) return 26;
+            if (score <= 4500000) return 27;
+
+            if (score <= 5000000) return 28;
+            if (score <= 10000000) return 29;
+            if (score <= 20000000) return 30;
+
+            return 31;
+        }
 
         public Task<long> UpdateScoreAsync(long customerId, long score)
         {
-            _lock.EnterWriteLock();
-            try
+            long oldScore = long.MinValue;
+            long newScore = _customerScores.AddOrUpdate(customerId, score, (key, exScore) =>
             {
-                long newScore = score;
-                if (_customerScores.TryGetValue(customerId, out long curScore))
+                oldScore = exScore;
+                return exScore + score;
+            });
+
+            if (oldScore == long.MinValue)
+            {
+                _customerScores.TryGetValue(customerId, out oldScore);
+            }
+
+            long oldBucketKey = GetBucketKey(oldScore);
+            long newBucketKey = GetBucketKey(newScore);
+
+            // Acquire locks in sequence while updating the prefix sum.
+            // Since the bucket size is larger than the score of a single update,
+            // the update of the prefix sum only occurs during cross-bucket operations,
+            // and only the prefix sum of one bucket needs to be updated each time.
+            if (oldBucketKey == newBucketKey)
+            {
+                if (oldBucketKey != 0)
                 {
-                    newScore = curScore + score;
-                    // Remove the customer from old bucket.
-                    long oldBucketKey = GetBucketKey(curScore);
-                    if (_scoreBuckets.TryGetValue(oldBucketKey, out var oldBucket))
+                    var oldBucket = _scoreBuckets[oldBucketKey];
+
+                    oldBucket.RwLock.WithWriteLock(() =>
                     {
-                        oldBucket.Remove(new CustomerEntry(curScore, customerId));
-                        if (oldBucket.Count == 0)
-                        {
-                            _scoreBuckets.Remove(oldBucketKey);
-                        }
-                    }
+                        oldBucket.CustomerSet.Remove(new CustomerEntry(oldScore, customerId));
+                        oldBucket.CustomerSet.Add(new CustomerEntry(newScore, customerId));
+                    });
                 }
-
-                _customerScores[customerId] = newScore;
-
-                // Add the customer to new bucket.
-                long newBucketKey = GetBucketKey(newScore);
-                if (!_scoreBuckets.TryGetValue(newBucketKey, out var newBucket))
+                else
                 {
-                    newBucket = new SortedSet<CustomerEntry>();
-                    _scoreBuckets[newBucketKey] = newBucket;
+                    // score <= 0, no need to rank
                 }
-                newBucket.Add(new CustomerEntry(newScore, customerId));
-
-                RebuildCache();
-
-                return Task.FromResult(newScore);
             }
-            finally
+            else if (newBucketKey > oldBucketKey)
             {
-                _lock.ExitWriteLock();
+                if (oldBucketKey != 0)
+                {
+                    var oldBucket = _scoreBuckets[oldBucketKey];
+                    var newBucket = _scoreBuckets[newBucketKey];
+
+                    // Acquire locks in sequence to prevent deadlocks.
+                    newBucket.RwLock.WithWriteLock(() =>
+                    {
+                        oldBucket.RwLock.WithWriteLock(() =>
+                        {
+                            oldBucket.CustomerSet.Remove(new CustomerEntry(oldScore, customerId));
+                            newBucket.CustomerSet.Add(new CustomerEntry(newScore, customerId));
+
+                            oldBucket.PrefixRank++;
+                        });
+                    });
+
+                }
+                else
+                {
+                    var newBucket = _scoreBuckets[newBucketKey];
+                    newBucket.RwLock.WithWriteLock(() =>
+                    {
+                        newBucket.CustomerSet.Add(new CustomerEntry(newScore, customerId));
+                    });
+                }
             }
+            else
+            {
+                // oldBucketKey > newBucketKey
+                if (newBucketKey != 0)
+                {
+                    var oldBucket = _scoreBuckets[oldBucketKey];
+                    var newBucket = _scoreBuckets[newBucketKey];
+
+                    // Acquire locks in sequence to prevent deadlocks.
+                    oldBucket.RwLock.WithWriteLock(() =>
+                    {
+                        newBucket.RwLock.WithWriteLock(() =>
+                        {
+                            oldBucket.CustomerSet.Remove(new CustomerEntry(oldScore, customerId));
+                            newBucket.CustomerSet.Add(new CustomerEntry(newScore, customerId));
+
+                            newBucket.PrefixRank--;
+                        });
+                    });
+                }
+                else
+                {
+                    var oldBucket = _scoreBuckets[oldBucketKey];
+                    oldBucket.RwLock.WithWriteLock(() =>
+                    {
+                        oldBucket.CustomerSet.Remove(new CustomerEntry(oldScore, customerId));
+                    });
+                }
+            }
+
+            return Task.FromResult(newScore);
         }
 
         public Task<List<CustomerRankInfo>> GetRanksAsync(int start, int end)
         {
-            _lock.EnterReadLock();
-
-            try
-            {
-                if (end < start || _customerScores.Count < start)
-                {
-                    return Task.FromResult(new List<CustomerRankInfo>());
-
-                }
-
-                return GetRanksByRangeAsync(start, end);
-            }
-            finally
-            {
-                _lock.ExitReadLock();
-            }
-        }
-
-        public Task<List<CustomerRankInfo>> GetRanksByIdAsync(long customerId, int high, int low)
-        {
-            _lock.EnterReadLock();
-
-            try
-            {
-                var result = new List<CustomerRankInfo>();
-                if (!_customerScores.TryGetValue(customerId, out var customerScore))
-                {
-                    return Task.FromResult(result);
-                }
-
-                long bucketKey = GetBucketKey(customerScore);
-                if (!_scoreBuckets.TryGetValue(bucketKey, out var bucket))
-                {
-                    return Task.FromResult(result);
-                }
-
-                // Calculate customer's rank.
-                int rankInBucket = 0;
-                foreach (var entry in bucket)
-                {
-                    if (entry.Score > customerScore || (entry.Score == customerScore && entry.CustomerId < customerId))
-                    {
-                        rankInBucket++;
-                    }
-                    else if (entry.CustomerId == customerId)
-                    {
-                        rankInBucket++;
-                        break;
-                    }
-                }
-
-                int customerRank = _prefixSumsByScore[bucketKey] + rankInBucket;
-
-                if (customerRank == 0)
-                {
-                    return Task.FromResult(result);
-                }
-                else
-                {
-                    int start = Math.Max(1, customerRank - high);
-                    int end = Math.Min(_customerScores.Count, customerRank + low);
-
-                    return GetRanksByRangeAsync(start, end);
-                }
-            }
-            finally
-            {
-                _lock.ExitReadLock();
-            }
-        }
-
-        private Task<List<CustomerRankInfo>> GetRanksByRangeAsync(int start, int end)
-        {
             var result = new List<CustomerRankInfo>();
-            if (_prefixSums.Count == 0)
+            if (end < start)
             {
                 return Task.FromResult(result);
             }
 
-            // Use binary search to find the starting bucket.
-            int startBucketIndex = BinarySearchBucket(start);
-            int curRank = _prefixSums[startBucketIndex].count + 1;
-
-            for (int bucketIdx = startBucketIndex; bucketIdx < _prefixSums.Count; bucketIdx++)
+            // Acquire locks in sequence to prevent deadlocks.
+            // When the next lock is needed, acquire the next lock first before releasing the current one.
+            // Moreover, locking in this way prevents the situation where the same user has multiple rankings.
+            for (long i = BUCKET_MAX_SIZE; i > 0; i--)
             {
-                var bucketKey = _prefixSums[bucketIdx].bucketKey;
-                var entries = _prefixSums[bucketIdx].bucket;
-
-                if (bucketKey < 0)
+                var bucket = _scoreBuckets[i];
+                if (i == BUCKET_MAX_SIZE)
                 {
-                    break;
+                    bucket.RwLock.EnterReadLock();
                 }
-
-                foreach (var entry in entries)
+                try
                 {
-                    if (curRank >= start && curRank <= end)
-                    {
-                        result.Add(new CustomerRankInfo
-                        {
-                            CustomerId = entry.CustomerId,
-                            Score = entry.Score,
-                            Rank = curRank
-                        });
+                    int curRank = bucket.PrefixRank + 1;
+                    int maxRank = bucket.PrefixRank + bucket.CustomerSet.Count;
 
-                        if (curRank == end)
-                        {
-                            return Task.FromResult(result);
-                        }
+                    if (end < curRank)
+                    {
+                        break;
                     }
 
-                    curRank++;
-                }
+                    if (maxRank < start)
+                    {
+                        if (i - 1 > 0)
+                        {
+                            _scoreBuckets[i - 1].RwLock.EnterReadLock();
+                        }
+                        continue;
+                    }
 
-                if (curRank > end)
+                    int innerRank = 1;
+                    foreach (var entry in bucket.CustomerSet)
+                    {
+                        if (start <= curRank && curRank <= end)
+                        {
+                            result.Add(new CustomerRankInfo
+                            {
+                                CustomerId = entry.CustomerId,
+                                Score = entry.Score,
+                                Rank = curRank
+                            });
+
+                            if (curRank == end)
+                            {
+                                return Task.FromResult(result);
+                            }
+                        }
+
+                        curRank++;
+                        innerRank++;
+                    }
+
+                    if (i - 1 > 0)
+                    {
+                        _scoreBuckets[i - 1].RwLock.EnterReadLock();
+                    }
+                }
+                finally
                 {
-                    break;
+                    bucket.RwLock.ExitReadLock();
                 }
             }
 
             return Task.FromResult(result);
         }
 
-        #region Utility function
-        /// <summary>
-        /// Calculate the bucket key for a given score
-        /// Scores are bucketed by ranges of BUCKET_SIZE
-        /// </summary>
-        private long GetBucketKey(long score)
+        public Task<List<CustomerRankInfo>> GetRanksByIdAsync(long customerId, int high, int low)
         {
-            return score >= 0 ? score / BUCKET_SIZE : (score - 99) / BUCKET_SIZE;
-        }
-
-        /// <summary>
-        /// Binary search to find the index of the score bucket that contains the target rank
-        /// </summary>
-        /// <param name="targetRank">The target rank (1-based)</param>
-        /// <returns>The index of the score bucket in the _prefixSums list</returns>
-        private int BinarySearchBucket(int targetRank)
-        {
-            int left = 0;
-            int right = _prefixSums.Count - 1;
-            int result = 0;
-
-            while (left <= right)
+            var result = new List<CustomerRankInfo>();
+            if (!_customerScores.TryGetValue(customerId, out var customerScore))
             {
-                int mid = left + (right - left) / 2;
+                return Task.FromResult(result);
+            }
 
-                int startRank = _prefixSums[mid].count + 1;
-                int endRank = mid == _prefixSums.Count - 1 ? _customerScores.Count : _prefixSums[mid + 1].count;
+            var customerBucketKey = GetBucketKey(customerScore);
+            if (customerBucketKey <= 0)
+            {
+                return Task.FromResult(result);
+            }
 
-                if (startRank <= targetRank && targetRank <= endRank)
+            // Get [1, CustomerBucket] ReadLock
+            for (long i = BUCKET_MAX_SIZE; i > customerBucketKey; i--)
+            {
+                var bucket = _scoreBuckets[i];
+                bucket.RwLock.EnterReadLock();
+            }
+            var customerBucket = _scoreBuckets[customerBucketKey];
+            customerBucket.RwLock.EnterReadLock();
+
+            // Get customer's rank
+            int customerRank = customerBucket.PrefixRank + 1;
+            foreach (var entry in customerBucket.CustomerSet)
+            {
+                if (entry.CustomerId == customerId)
                 {
-                    return mid;
+                    break;
                 }
-                else if (targetRank < startRank)
+                customerRank++;
+            }
+
+            int start = Math.Max(1, customerRank - high);
+            int end = customerRank + low;
+
+            // Acquire locks in sequence to prevent deadlocks.
+            // When the next lock is needed, acquire the next lock first before releasing the current one.
+            // Moreover, locking in this way prevents the situation where the same user has multiple rankings.
+            for (long i = BUCKET_MAX_SIZE; i > 0; i--)
+            {
+                var bucket = _scoreBuckets[i];
+                try
                 {
-                    right = mid - 1;
+                    int curRank = bucket.PrefixRank + 1;
+                    int maxRank = bucket.PrefixRank + bucket.CustomerSet.Count;
+
+                    if (end < curRank)
+                    {
+                        break;
+                    }
+
+                    if (maxRank < start)
+                    {
+                        if (customerBucketKey > i - 1 && i - 1 > 0)
+                        {
+                            _scoreBuckets[i - 1].RwLock.EnterReadLock();
+                        }
+                        continue;
+                    }
+
+                    int innerRank = 1;
+                    foreach (var entry in bucket.CustomerSet)
+                    {
+                        if (start <= curRank && curRank <= end)
+                        {
+                            result.Add(new CustomerRankInfo
+                            {
+                                CustomerId = entry.CustomerId,
+                                Score = entry.Score,
+                                Rank = curRank
+                            });
+
+                            if (curRank == end)
+                            {
+                                return Task.FromResult(result);
+                            }
+                        }
+
+                        curRank++;
+                        innerRank++;
+                    }
+
+                    if (customerBucketKey > i - 1 && i - 1 > 0)
+                    {
+                        _scoreBuckets[i - 1].RwLock.EnterReadLock();
+                    }
                 }
-                else
+                finally
                 {
-                    left = mid + 1;
-                    result = mid + 1;
+                    bucket.RwLock.ExitReadLock();
                 }
             }
 
-            return result;
+            return Task.FromResult(result);
         }
-
-        /// <summary>
-        /// Rebuilds cache
-        /// </summary>
-        private void RebuildCache()
-        {
-            int count = 0;
-            _prefixSums.Clear();
-            _prefixSumsByScore.Clear();
-            _rankByCustomerId.Clear();
-
-            foreach (var bucket in _scoreBuckets)
-            {
-                _prefixSums.Add((count, bucket.Key, bucket.Value));
-                _prefixSumsByScore.Add(bucket.Key, count);
-                count += bucket.Value.Count;
-            }
-        }
-        #endregion 
 
         public void Dispose()
         {
-            _lock?.Dispose();
         }
     }
 }

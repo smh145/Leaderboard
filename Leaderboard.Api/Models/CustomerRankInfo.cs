@@ -1,4 +1,4 @@
-namespace Leaderboard.Api.Controllers.Leaderboard.Dtos
+namespace Leaderboard.Api.Controllers.Models
 {
     public class CustomerRankInfo
     {

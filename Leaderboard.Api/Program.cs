@@ -10,7 +10,6 @@ namespace Leaderboard.Api
             var builder = WebApplication.CreateBuilder(args);
 
             builder.Services.AddSingleton<ILeaderboardService, LeaderboardService>();
-            // builder.Services.AddSingleton<ILeaderboardService, SnapshotLeaderboardService>();
             builder.Services.AddScoped<ICustomerService, CustomerService>();
 
             builder.Services.AddControllers();

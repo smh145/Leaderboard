@@ -1,4 +1,4 @@
-using Leaderboard.Api.Controllers.Leaderboard.Dtos;
+using Leaderboard.Api.Controllers.Models;
 
 namespace Leaderboard.Api.Interfaces
 {
