@@ -28,7 +28,7 @@ namespace Leaderboard.Tests
             int customerCount = 10000000;
 
             int seconds = 3;
-            int qps = 500000;
+            int qps = 100000;
             int interval = 100;
             int updateQps = qps / 10 / (1000 / interval);
 

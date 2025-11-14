@@ -41,39 +41,19 @@ namespace Leaderboard.Api.Services
         {
             if (score <= 0) return 0;
 
-            if (score <= 5000) return 1;
-            if (score <= 10000) return 2;
-            if (score <= 15000) return 3;
-            if (score <= 20000) return 4;
-            if (score <= 25000) return 5;
-            if (score <= 30000) return 6;
-            if (score <= 35000) return 7;
-            if (score <= 40000) return 8;
-            if (score <= 45000) return 9;
+            if (score <= 5000) return 1; if (score <= 10000) return 2; if (score <= 15000) return 3;
+            if (score <= 20000) return 4; if (score <= 25000) return 5; if (score <= 30000) return 6;
+            if (score <= 35000) return 7; if (score <= 40000) return 8; if (score <= 45000) return 9;
 
-            if (score <= 50000) return 10;
-            if (score <= 100000) return 11;
-            if (score <= 150000) return 12;
-            if (score <= 200000) return 13;
-            if (score <= 250000) return 14;
-            if (score <= 300000) return 15;
-            if (score <= 350000) return 16;
-            if (score <= 400000) return 17;
-            if (score <= 450000) return 18;
+            if (score <= 50000) return 10; if (score <= 100000) return 11; if (score <= 150000) return 12;
+            if (score <= 200000) return 13; if (score <= 250000) return 14; if (score <= 300000) return 15;
+            if (score <= 350000) return 16; if (score <= 400000) return 17; if (score <= 450000) return 18;
 
-            if (score <= 500000) return 19;
-            if (score <= 1000000) return 20;
-            if (score <= 1500000) return 21;
-            if (score <= 2000000) return 22;
-            if (score <= 2500000) return 23;
-            if (score <= 3000000) return 24;
-            if (score <= 3500000) return 25;
-            if (score <= 4000000) return 26;
-            if (score <= 4500000) return 27;
+            if (score <= 500000) return 19; if (score <= 1000000) return 20; if (score <= 1500000) return 21;
+            if (score <= 2000000) return 22; if (score <= 2500000) return 23; if (score <= 3000000) return 24;
+            if (score <= 3500000) return 25; if (score <= 4000000) return 26; if (score <= 4500000) return 27;
 
-            if (score <= 5000000) return 28;
-            if (score <= 10000000) return 29;
-            if (score <= 20000000) return 30;
+            if (score <= 5000000) return 28; if (score <= 10000000) return 29; if (score <= 20000000) return 30;
 
             return 31;
         }
@@ -216,7 +196,16 @@ namespace Leaderboard.Api.Services
                     }
 
                     int innerRank = 1;
-                    foreach (var entry in bucket.CustomerSet)
+                    IEnumerable<CustomerEntry> view = bucket.CustomerSet;
+                    if (curRank < start)
+                    {
+                        // O(log N) to find the start
+                        innerRank = start - bucket.PrefixRank;
+                        view = bucket.CustomerSet.RangeByRank(innerRank, bucket.CustomerSet.Count);
+                        curRank = start;
+                    }
+
+                    foreach (var entry in view)
                     {
                         if (start <= curRank && curRank <= end)
                         {
@@ -265,7 +254,7 @@ namespace Leaderboard.Api.Services
                 return Task.FromResult(result);
             }
 
-            // Get [1, CustomerBucket] ReadLock
+            // Only get [1, CustomerBucket] ReadLock
             for (long i = BUCKET_MAX_SIZE; i > customerBucketKey; i--)
             {
                 var bucket = _scoreBuckets[i];
@@ -275,19 +264,12 @@ namespace Leaderboard.Api.Services
             customerBucket.RwLock.EnterReadLock();
 
             // Get customer's rank
-            int customerRank = customerBucket.PrefixRank + 1;
-            foreach (var entry in customerBucket.CustomerSet)
-            {
-                if (entry.CustomerId == customerId)
-                {
-                    break;
-                }
-                customerRank++;
-            }
+            int customerRank = customerBucket.PrefixRank + customerBucket.CustomerSet.GetRankByValue(new CustomerEntry(customerScore, customerId));
 
             int start = Math.Max(1, customerRank - high);
             int end = customerRank + low;
 
+            // Get (CustomerBucket, EndBucket] ReadLock
             // Acquire locks in sequence to prevent deadlocks.
             // When the next lock is needed, acquire the next lock first before releasing the current one.
             // Moreover, locking in this way prevents the situation where the same user has multiple rankings.
@@ -314,7 +296,16 @@ namespace Leaderboard.Api.Services
                     }
 
                     int innerRank = 1;
-                    foreach (var entry in bucket.CustomerSet)
+                    IEnumerable<CustomerEntry> view = bucket.CustomerSet;
+                    if (curRank < start)
+                    {
+                        // O(log N) to find the start
+                        innerRank = start - bucket.PrefixRank;
+                        view = bucket.CustomerSet.RangeByRank(innerRank, bucket.CustomerSet.Count);
+                        curRank = start;
+                    }
+
+                    foreach (var entry in view)
                     {
                         if (start <= curRank && curRank <= end)
                         {

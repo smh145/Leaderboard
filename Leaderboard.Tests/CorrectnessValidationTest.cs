@@ -1,5 +1,6 @@
 ﻿using Leaderboard.Api.Interfaces;
 using Leaderboard.Api.Services;
+using NATS.Client.Service;
 using Xunit.Abstractions;
 
 namespace Leaderboard.Tests
@@ -11,6 +12,26 @@ namespace Leaderboard.Tests
         public CorrectnessValidationTest(ITestOutputHelper output)
         {
             _output = output;
+        }
+
+
+        [Fact]
+        public async Task ValidateSimple()
+        {
+            _output.WriteLine("=== Concurrent Operations Validation Started ===\n");
+
+            ILeaderboardService service = new LeaderboardService();
+            await service.UpdateScoreAsync(4, 50);
+            await service.UpdateScoreAsync(3, 50);
+            await service.UpdateScoreAsync(1, 50);
+            await service.UpdateScoreAsync(2, 50);
+            await service.UpdateScoreAsync(2, 50);
+
+
+            var allRanks = await service.GetRanksAsync(2, 100);
+            Assert.True(allRanks.Count == 3, "Ranking order is correct");
+
+            _output.WriteLine("\n=== Concurrent Operations Validation Passed Y  ===");
         }
 
         [Fact]
@@ -195,6 +216,159 @@ namespace Leaderboard.Tests
             _output.WriteLine($"Y  Ranking order is still correct");
 
             _output.WriteLine("\n=== Concurrent Operations Validation Passed Y  ===");
+        }
+
+
+        [Fact]
+        public async Task ValidateSkipListCorrectness()
+        {
+            _output.WriteLine("=== Skip List Correctness Validation Started ===\n");
+
+            ILeaderboardService service = new LeaderboardService();
+
+            // Test 1: Insert and retrieve single element
+            _output.WriteLine("Test 1: Single Element Operations");
+            await service.UpdateScoreAsync(1, 100);
+            var ranks = await service.GetRanksAsync(1, 1);
+            Assert.Single(ranks);
+            Assert.Equal(1, ranks[0].CustomerId);
+            Assert.Equal(100, ranks[0].Score);
+            Assert.Equal(1, ranks[0].Rank);
+            _output.WriteLine("Y Single element insert and retrieve works correctly");
+
+            // Test 2: Insert elements in ascending order
+            _output.WriteLine("\nTest 2: Ascending Order Insertion");
+            ILeaderboardService service2 = new LeaderboardService();
+            for (long i = 1; i <= 10; i++)
+            {
+                await service2.UpdateScoreAsync(i, i * 10);
+            }
+            var ascendingRanks = await service2.GetRanksAsync(1, 10);
+            Assert.Equal(10, ascendingRanks.Count);
+            for (int i = 0; i < 10; i++)
+            {
+                Assert.Equal(10 - i, ascendingRanks[i].CustomerId);
+                Assert.Equal((10 - i) * 10, ascendingRanks[i].Score);
+            }
+            _output.WriteLine("Y Ascending insertion maintains correct ranking");
+
+            // Test 3: Insert elements in descending order
+            _output.WriteLine("\nTest 3: Descending Order Insertion");
+            ILeaderboardService service3 = new LeaderboardService();
+            for (long i = 10; i >= 1; i--)
+            {
+                await service3.UpdateScoreAsync(i, i * 10);
+            }
+            var descendingRanks = await service3.GetRanksAsync(1, 10);
+            Assert.Equal(10, descendingRanks.Count);
+            for (int i = 0; i < 10; i++)
+            {
+                Assert.Equal(10 - i, descendingRanks[i].CustomerId);
+                Assert.Equal((10 - i) * 10, descendingRanks[i].Score);
+            }
+            _output.WriteLine("Y Descending insertion maintains correct ranking");
+
+            // Test 4: Random insertion order
+            _output.WriteLine("\nTest 4: Random Order Insertion");
+            ILeaderboardService service4 = new LeaderboardService();
+            var random = new Random(123);
+            var customerIds = Enumerable.Range(1, 50).OrderBy(x => random.Next()).ToList();
+            foreach (var id in customerIds)
+            {
+                await service4.UpdateScoreAsync(id, random.Next(1, 1000));
+            }
+            var randomRanks = await service4.GetRanksAsync(1, 50);
+            Assert.Equal(50, randomRanks.Count);
+            for (int i = 0; i < randomRanks.Count - 1; i++)
+            {
+                Assert.True(randomRanks[i].Score > randomRanks[i + 1].Score ||
+                           (randomRanks[i].Score == randomRanks[i + 1].Score &&
+                            randomRanks[i].CustomerId < randomRanks[i + 1].CustomerId));
+            }
+            _output.WriteLine("Y Random insertion maintains skip list integrity");
+
+            // Test 5: Multiple updates to same customer
+            _output.WriteLine("\nTest 5: Multiple Updates to Same Customer");
+            ILeaderboardService service5 = new LeaderboardService();
+            await service5.UpdateScoreAsync(1, 100);
+            await service5.UpdateScoreAsync(2, 200);
+            await service5.UpdateScoreAsync(3, 300);
+
+            await service5.UpdateScoreAsync(1, 250); // Total: 350
+            var updated = await service5.GetRanksAsync(1, 3);
+            Assert.Equal(1, updated[0].CustomerId);
+            Assert.Equal(350, updated[0].Score);
+            Assert.Equal(1, updated[0].Rank);
+            _output.WriteLine("Y Skip list correctly repositions updated elements");
+
+            // Test 6: Dense tie scenarios
+            _output.WriteLine("\nTest 6: Dense Tie Scenarios");
+            ILeaderboardService service6 = new LeaderboardService();
+            for (long i = 1; i <= 20; i++)
+            {
+                await service6.UpdateScoreAsync(i, 1000); // All same score
+            }
+            var ties = await service6.GetRanksAsync(1, 20);
+            Assert.Equal(20, ties.Count);
+            for (int i = 0; i < 20; i++)
+            {
+                Assert.Equal(i + 1, ties[i].CustomerId);
+                Assert.Equal(1000, ties[i].Score);
+                Assert.Equal(i + 1, ties[i].Rank);
+            }
+            _output.WriteLine("Y Skip list handles dense ties correctly (tie-breaking by customer ID)");
+
+            // Test 7: Large scale skip list stress test
+            _output.WriteLine("\nTest 7: Large Scale Skip List Stress Test");
+            ILeaderboardService service7 = new LeaderboardService();
+            var largeRandom = new Random(456);
+            for (long i = 1; i <= 1000; i++)
+            {
+                await service7.UpdateScoreAsync(i, largeRandom.Next(1, 1000));
+            }
+            for (long i = 1; i <= 1000; i++)
+            {
+                await service7.UpdateScoreAsync(i, largeRandom.Next(1, 1000));
+            }
+            for (long i = 1; i <= 1000; i++)
+            {
+                await service7.UpdateScoreAsync(i, largeRandom.Next(1, 1000));
+            }
+            var largeRanks = await service7.GetRanksAsync(1, 1000);
+            Assert.Equal(1000, largeRanks.Count);
+
+            // Verify ordering
+            for (int i = 0; i < largeRanks.Count - 1; i++)
+            {
+                Assert.True(largeRanks[i].Score > largeRanks[i + 1].Score ||
+                           (largeRanks[i].Score == largeRanks[i + 1].Score &&
+                            largeRanks[i].CustomerId < largeRanks[i + 1].CustomerId),
+                           $"Order violation at index {i}");
+            }
+
+            // Verify rank continuity
+            for (int i = 0; i < largeRanks.Count; i++)
+            {
+                _output.WriteLine($"{i + 1} {largeRanks[i].Rank}");
+                Assert.Equal(i + 1, largeRanks[i].Rank);
+            }
+            _output.WriteLine($"Y Skip list maintains integrity with 1000 elements");
+
+            // Test 8: Verify GetRanksByIdAsync traversal
+            _output.WriteLine("\nTest 8: Context Window Traversal");
+            var contextResult = await service7.GetRanksByIdAsync(500, 10, 10);
+            Assert.True(contextResult.Count > 0);
+            var target = contextResult.FirstOrDefault(r => r.CustomerId == 500);
+            Assert.NotNull(target);
+
+            // Verify context window is ordered
+            for (int i = 0; i < contextResult.Count - 1; i++)
+            {
+                Assert.True(contextResult[i].Rank < contextResult[i + 1].Rank);
+            }
+            _output.WriteLine($"Y Context window traversal maintains skip list ordering");
+
+            _output.WriteLine("\n=== Skip List Correctness Validation Passed Y ===");
         }
     }
 }
