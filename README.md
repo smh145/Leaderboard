@@ -1,20 +1,10 @@
-I've implemented two different leaderboard services, but neither can handle millions QPS， only handle hundreds thousand QPS.
-
 ### LeaderboardService
-Leaderboard use ReaderWriterLockSlim
-ReaderWriterLockSlim does not strictly guarantee FIFO on the server side
-So the Leaderboard is not completely real-time
-If a fair reader-writer lock could be implemented, further optimizations are possible (I failed):
-1. For an update request, the current score can be returned immediately, while the Leaderboard update operation waits for the lock.
-2. Consecutive write requests can be merged. Updates for the same customerId can be combined, reducing the number of write lock acquisitions.
-3. Rebuild the cache when switching between read and write locks.
+Thank you to all the teachers for your guidance and patient waiting, giving me the opportunity to complete such a program. I'm really happy ^_^
 
-### SnapshotLeaderboardService
-Snapshot leaderboard implementation using background task and buffering.
-This leaderboard service achieves more efficient score updates and rank queries by buffering score changes in a queue 
-and periodically processing these updates via a background task to build leaderboard snapshots.
-1. When updating scores, the service adds update requests to the queue and immediately returns the latest score to the caller.
-2. Reduces write lock hold time, improving concurrent processing capability.
-3. During periodic leaderboard rebuilds, merges score change operations for the same user, reducing the number of sorts.
-4. Reduces the frequency of cache rebuilds.
-However, this may result in situations where score updates succeed but rank queries do not yet reflect the latest scores.
+Compared to the previous version, this version has several major improvements:
+
+1.  **Bucketing strategy**: Although the previous version considered score-based bucketing, it used a global lock and small buckets (100 points / bucket), leading to many cross-bucket operations and poor prefix sum maintenance with O(n) complexity. This version considers lock granularity by dividing into 32 buckets with manually specified boundaries. These can be adjusted based on business hotspots - hotspot segments can have smaller buckets, and bucket sizes should ideally exceed 2000 to reduce the probability of cross-bucket operations.
+
+2.  **Data structure optimization**: A significant portion of the development time for the previous version was spent attempting to implement custom locks and thread queues, but these efforts ultimately failed, wasting most of the time. Using `SortedSet` resulted in O(n) time complexity for rank-based positioning and querying customer rankings within buckets. This version implements `SkipList`, optimizing both operations to O(log n) complexity. In the current business scenario, the skip list is unlikely to degrade to its worst-case performance.
+
+3.  **Code complexity**: The code may seem verbose, but this is intentional to achieve finer-grained locking.

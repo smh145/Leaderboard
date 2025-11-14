@@ -153,14 +153,13 @@ namespace Leaderboard.Api.DataStructures
                 }
             }
 
-            // 检查是否找到精确匹配的值
             x = x.Forward[0];
             if (x != null && x.Value.CompareTo(value) == 0)
             {
-                return rank + 1; // 返回从1开始的排名
+                return rank + 1;
             }
 
-            return -1; // 未找到该值
+            return -1;
         }
 
         private SkipListNode? GetNodeByRank(int rank)
